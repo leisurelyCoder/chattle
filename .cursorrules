@@ -1,0 +1,839 @@
+# 1-to-1 Real-Time Chat Application - Cursor Rules
+
+## Project Architecture
+
+### Folder Structure
+```
+project-root/
+├── backend/
+│   ├── src/
+│   │   ├── config/
+│   │   │   ├── database.js
+│   │   │   ├── socket.js
+│   │   │   └── jwt.js
+│   │   ├── controllers/
+│   │   │   ├── authController.js
+│   │   │   ├── userController.js
+│   │   │   └── conversationController.js
+│   │   ├── services/
+│   │   │   ├── authService.js
+│   │   │   ├── userService.js
+│   │   │   ├── conversationService.js
+│   │   │   └── messageService.js
+│   │   ├── models/
+│   │   │   ├── User.js
+│   │   │   ├── Conversation.js
+│   │   │   └── Message.js
+│   │   ├── middleware/
+│   │   │   ├── authMiddleware.js
+│   │   │   ├── socketAuth.js
+│   │   │   ├── rateLimiter.js
+│   │   │   └── sanitizer.js
+│   │   ├── routes/
+│   │   │   ├── authRoutes.js
+│   │   │   ├── userRoutes.js
+│   │   │   └── conversationRoutes.js
+│   │   ├── socket/
+│   │   │   ├── socketHandlers.js
+│   │   │   ├── socketEvents.js
+│   │   │   └── socketMiddleware.js
+│   │   ├── utils/
+│   │   │   ├── validators.js
+│   │   │   ├── errors.js
+│   │   │   └── helpers.js
+│   │   └── server.js
+│   ├── migrations/
+│   └── package.json
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── chat/
+│   │   │   │   ├── ChatWindow.vue
+│   │   │   │   ├── MessageBubble.vue
+│   │   │   │   ├── MessageInput.vue
+│   │   │   │   ├── TypingIndicator.vue
+│   │   │   │   └── OnlineStatus.vue
+│   │   │   ├── auth/
+│   │   │   │   ├── LoginForm.vue
+│   │   │   │   └── RegisterForm.vue
+│   │   │   └── common/
+│   │   │       ├── ConversationList.vue
+│   │   │       └── UserSearch.vue
+│   │   ├── stores/
+│   │   │   ├── authStore.js
+│   │   │   ├── chatStore.js
+│   │   │   └── socketStore.js
+│   │   ├── services/
+│   │   │   ├── api.js
+│   │   │   ├── socketService.js
+│   │   │   └── authService.js
+│   │   ├── composables/
+│   │   │   ├── useSocket.js
+│   │   │   ├── useChat.js
+│   │   │   └── useAuth.js
+│   │   ├── utils/
+│   │   │   ├── validators.js
+│   │   │   └── formatters.js
+│   │   ├── router/
+│   │   │   └── index.js
+│   │   └── App.vue
+│   └── package.json
+└── .cursorrules
+```
+
+---
+
+## Database Schema (MySQL)
+
+### Tables Required
+
+**users**
+- id (CHAR(36), PRIMARY KEY, DEFAULT (UUID()))
+- username (VARCHAR(50), UNIQUE, NOT NULL)
+- email (VARCHAR(255), UNIQUE, NOT NULL)
+- password_hash (VARCHAR(255), NOT NULL)
+- avatar_url (VARCHAR(500))
+- is_online (TINYINT(1), DEFAULT 0)
+- last_seen (TIMESTAMP NULL)
+- created_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP)
+- updated_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)
+- INDEX idx_users_email (email)
+- INDEX idx_users_username (username)
+
+**conversations**
+- id (CHAR(36), PRIMARY KEY, DEFAULT (UUID()))
+- participant1_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE)
+- participant2_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE)
+- last_message_id (CHAR(36), FOREIGN KEY REFERENCES messages(id) ON DELETE SET NULL)
+- last_message_at (TIMESTAMP NULL)
+- created_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP)
+- updated_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)
+- UNIQUE KEY unique_participants (participant1_id, participant2_id)
+- INDEX idx_conversations_participants (participant1_id, participant2_id)
+- INDEX idx_conversations_last_message (last_message_at DESC)
+
+**messages**
+- id (CHAR(36), PRIMARY KEY, DEFAULT (UUID()))
+- conversation_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES conversations(id) ON DELETE CASCADE)
+- sender_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE)
+- receiver_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE)
+- content (TEXT, NOT NULL)
+- delivery_status (ENUM('sent', 'delivered', 'read'), DEFAULT 'sent')
+- created_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP)
+- updated_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)
+- INDEX idx_messages_conversation (conversation_id, created_at DESC)
+- INDEX idx_messages_sender (sender_id)
+- INDEX idx_messages_receiver (receiver_id)
+- INDEX idx_messages_status (receiver_id, delivery_status)
+
+**user_sessions**
+- id (CHAR(36), PRIMARY KEY, DEFAULT (UUID()))
+- user_id (CHAR(36), NOT NULL, FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE)
+- socket_id (VARCHAR(255), UNIQUE)
+- is_active (TINYINT(1), DEFAULT 1)
+- created_at (TIMESTAMP, DEFAULT CURRENT_TIMESTAMP)
+- INDEX idx_sessions_user (user_id)
+- INDEX idx_sessions_socket (socket_id)
+
+### Database Rules
+- Always use parameterized queries to prevent SQL injection
+- Use transactions for multi-step operations (e.g., creating conversation + first message)
+- Implement connection pooling (min: 2, max: 10) using mysql2/promise
+- Use database migrations for schema changes
+- Add database indexes for all foreign keys and frequently queried fields
+- Use UUIDs (CHAR(36)) for all primary keys (MySQL 8.0+ supports UUID() function)
+- Use ENUM for delivery_status instead of CHECK constraint (better MySQL compatibility)
+- Use TINYINT(1) for boolean fields (0 = false, 1 = true)
+- Use CURRENT_TIMESTAMP for default timestamps
+- Use ON UPDATE CURRENT_TIMESTAMP for updated_at fields
+- Never expose raw database errors to clients
+- Use mysql2 library for Node.js (supports promises and connection pooling)
+- Use mysql2/promise for async/await syntax
+- Handle MySQL connection errors gracefully (ECONNREFUSED, ETIMEDOUT)
+- Use connection.query() with placeholders (?) for parameterized queries
+- Enable multipleStatements: false for security
+- Set timezone: 'local' or 'UTC' in connection config
+- Use charset: 'utf8mb4' for full Unicode support (emojis, special characters)
+
+---
+
+## Backend Rules
+
+### Express Server Setup
+- Use Express 4.x with async/await pattern
+- Enable CORS with credentials for frontend domain
+- Use express.json() and express.urlencoded() middleware
+- Implement request logging (morgan or winston)
+- Use helmet for security headers
+- Set up error handling middleware (must be last)
+- Use compression middleware
+- Environment variables via dotenv
+- Port from process.env.PORT or default to 3000
+
+### Authentication (JWT)
+- Use jsonwebtoken library
+- Access token: 15 minutes expiry
+- Refresh token: 7 days expiry (stored in httpOnly cookie)
+- Token payload: { userId, username, email }
+- Secret key from environment variable (minimum 32 characters)
+- Implement token refresh endpoint
+- Validate JWT on every protected route
+- Store refresh tokens in database with user_id and expiry
+- Blacklist revoked tokens (use Redis in production, in-memory for dev)
+
+### Authentication Middleware
+```javascript
+// authMiddleware.js pattern
+- Extract token from Authorization header (Bearer <token>)
+- Verify JWT signature and expiry
+- Attach user object to req.user
+- Return 401 if invalid/expired
+- Handle token refresh automatically if refresh token valid
+```
+
+### Socket Authentication
+- Validate JWT on socket connection (handshake.auth.token)
+- Reject connection if token invalid
+- Attach user to socket.data.user
+- Store socket_id in user_sessions table
+- Remove socket_id on disconnect
+- Update user.is_online status based on active sessions (0 = offline, 1 = online)
+
+### Rate Limiting
+- Use express-rate-limit
+- Auth endpoints: 5 requests per 15 minutes per IP
+- Message sending: 30 messages per minute per user
+- API endpoints: 100 requests per 15 minutes per IP
+- Return 429 with Retry-After header
+- Use Redis for distributed rate limiting in production
+
+### Input Validation & Sanitization
+- Use express-validator or joi
+- Validate all user inputs (email format, username length, message length)
+- Sanitize message content (remove XSS, trim whitespace)
+- Maximum message length: 5000 characters
+- Username: 3-50 characters, alphanumeric + underscore
+- Email: valid email format
+- Password: minimum 8 characters, at least one letter and one number
+- Reject empty messages
+- Escape HTML in messages before storing
+
+### Error Handling
+- Create custom error classes (ValidationError, AuthenticationError, NotFoundError)
+- Use consistent error response format: { error: { code, message, details? } }
+- Log errors with stack traces (server-side only)
+- Never expose database errors or stack traces to clients
+- Return appropriate HTTP status codes (400, 401, 403, 404, 429, 500)
+
+### REST API Endpoints
+
+**Authentication**
+- POST /api/auth/register
+  - Body: { username, email, password }
+  - Returns: { user: { id, username, email }, accessToken }
+  - Hash password with bcrypt (salt rounds: 10)
+  - Validate unique username and email
+  
+- POST /api/auth/login
+  - Body: { email, password }
+  - Returns: { user: { id, username, email }, accessToken }
+  - Set refresh token in httpOnly cookie
+  
+- POST /api/auth/refresh
+  - Cookie: refreshToken
+  - Returns: { accessToken }
+  
+- POST /api/auth/logout
+  - Cookie: refreshToken
+  - Invalidates refresh token
+  - Returns: { message: "Logged out" }
+
+**Users**
+- GET /api/users/me
+  - Auth required
+  - Returns: { id, username, email, avatar_url, is_online, last_seen }
+  
+- GET /api/users/search?q=<query>
+  - Auth required
+  - Returns: [{ id, username, email, avatar_url, is_online }]
+  - Exclude current user
+  - Limit 20 results
+
+**Conversations**
+- GET /api/conversations
+  - Auth required
+  - Returns: [{ id, participant, lastMessage, unreadCount, updatedAt }]
+  - Order by last_message_at DESC
+  - Include participant details (other user)
+  
+- GET /api/conversations/:conversationId
+  - Auth required
+  - Verify user is participant
+  - Returns: { id, participant, messages: [] }
+  
+- POST /api/conversations
+  - Auth required
+  - Body: { participantId }
+  - Returns: { id, participant, messages: [] }
+  - Check if conversation exists, return existing if found
+  - Create new conversation if not exists
+
+**Messages**
+- GET /api/conversations/:conversationId/messages
+  - Auth required
+  - Query params: ?page=1&limit=50
+  - Returns: { messages: [], pagination: { page, limit, total, hasMore } }
+  - Order by created_at DESC
+  - Verify user is conversation participant
+  
+- POST /api/conversations/:conversationId/messages
+  - Auth required
+  - Body: { content }
+  - Returns: { id, sender_id, receiver_id, content, delivery_status, created_at }
+  - Verify sender_id matches authenticated user
+  - Update conversation last_message_at
+  - Emit socket event to receiver
+
+### Service Layer Rules
+- All business logic in services, not controllers
+- Services return data objects, not HTTP responses
+- Controllers call services and format HTTP responses
+- Services handle database transactions
+- Services validate business rules (e.g., user can't message themselves)
+- Services handle errors and throw custom errors
+
+### Message Service Rules
+- Create message with delivery_status: 'sent'
+- Update conversation.last_message_at
+- Emit socket event to receiver
+- If receiver is online, update status to 'delivered' immediately
+- Store message in database before emitting socket event
+- Handle message creation in transaction
+
+### Conversation Service Rules
+- getOrCreateConversation: Check if conversation exists between two users
+- If exists, return existing conversation
+- If not, create new conversation
+- Always verify both participants exist
+- Prevent duplicate conversations (use unique constraint)
+
+---
+
+## Socket.IO Rules
+
+### Connection Setup
+- Use Socket.IO v4.x
+- Enable CORS for frontend origin
+- Use path: '/socket.io'
+- Enable transports: ['websocket', 'polling']
+- Set pingTimeout: 60000, pingInterval: 25000
+- Use namespaces: '/chat'
+
+### Socket Events
+
+**Client → Server Events**
+
+- `authenticate` (on connection)
+  - Payload: { token }
+  - Validate JWT
+  - Join user-specific room: `user:${userId}`
+  - Update user.is_online = 1
+  - Emit `authenticated` to client
+  
+- `join_conversation`
+  - Payload: { conversationId }
+  - Verify user is participant
+  - Join room: `conversation:${conversationId}`
+  - Emit conversation history if needed
+  
+- `leave_conversation`
+  - Payload: { conversationId }
+  - Leave room: `conversation:${conversationId}`
+  
+- `send_message`
+  - Payload: { conversationId, content }
+  - Validate: user is participant, content not empty
+  - Create message in database
+  - Emit `new_message` to conversation room
+  - Update delivery_status to 'delivered' if receiver online
+  - Emit `message_delivered` to sender
+  
+- `typing_start`
+  - Payload: { conversationId }
+  - Emit `user_typing` to conversation room (excluding sender)
+  - Use debounce: clear typing after 3 seconds of inactivity
+  
+- `typing_stop`
+  - Payload: { conversationId }
+  - Emit `user_stopped_typing` to conversation room
+  
+- `mark_read`
+  - Payload: { conversationId, messageIds: [] }
+  - Update message delivery_status to 'read'
+  - Emit `messages_read` to sender
+  - Batch update for performance
+
+**Server → Client Events**
+
+- `authenticated`
+  - Payload: { userId, username }
+  - Sent after successful authentication
+  
+- `new_message`
+  - Payload: { id, sender_id, receiver_id, content, delivery_status, created_at }
+  - Emitted to conversation room
+  
+- `message_delivered`
+  - Payload: { messageId, conversationId }
+  - Emitted to sender when message delivered
+  
+- `message_read`
+  - Payload: { messageIds: [], conversationId }
+  - Emitted to sender when messages read
+  
+- `user_typing`
+  - Payload: { userId, username, conversationId }
+  - Emitted to conversation room (excluding typer)
+  
+- `user_stopped_typing`
+  - Payload: { userId, conversationId }
+  
+- `user_online`
+  - Payload: { userId }
+  - Emitted to user's connections when they come online
+  
+- `user_offline`
+  - Payload: { userId, lastSeen }
+  - Emitted when user disconnects
+
+### Socket Middleware
+- Authenticate on connection (handshake.auth.token)
+- Attach user to socket.data.user
+- Rate limit per socket connection
+- Log socket events for debugging
+- Handle reconnection gracefully
+
+### Room Management
+- User room: `user:${userId}` (for user-specific events)
+- Conversation room: `conversation:${conversationId}` (for message events)
+- Clean up rooms on disconnect
+- Track active rooms per user
+
+### Disconnect Handling
+- Update user.is_online = 0 if no active sessions
+- Update user.last_seen = CURRENT_TIMESTAMP
+- Remove socket_id from user_sessions
+- Emit `user_offline` to user's connections
+- Leave all conversation rooms
+
+---
+
+## Frontend Rules (Vue.js 3)
+
+### Vue 3 Composition API
+- Use `<script setup>` syntax exclusively
+- Use Composition API (ref, reactive, computed, watch)
+- Use TypeScript if project uses .ts files, otherwise JavaScript
+- Use defineProps and defineEmits for component props/events
+- Use provide/inject for deep prop drilling (avoid when possible)
+
+### Component Structure
+```vue
+<template>
+  <!-- HTML structure -->
+</template>
+
+<script setup>
+// Imports
+// Props
+// Emits
+// Composables
+// Reactive state
+// Computed properties
+// Methods
+// Lifecycle hooks
+</script>
+
+<style scoped>
+/* Tailwind classes or scoped CSS */
+</style>
+```
+
+### State Management (Pinia)
+
+**authStore**
+- State: user, isAuthenticated, accessToken
+- Actions: login, register, logout, refreshToken
+- Getters: currentUser, isLoggedIn
+- Persist user to localStorage (encrypted or use httpOnly cookies)
+
+**chatStore**
+- State: conversations, activeConversation, messages, typingUsers, onlineUsers
+- Actions: 
+  - fetchConversations
+  - selectConversation(conversationId)
+  - fetchMessages(conversationId, page)
+  - sendMessage(content)
+  - markAsRead(messageIds)
+  - updateMessageStatus(messageId, status)
+- Getters: 
+  - getConversationById
+  - getMessagesByConversation
+  - getUnreadCount
+
+**socketStore**
+- State: socket, isConnected, reconnectAttempts
+- Actions: connect, disconnect, emit, on
+- Handle reconnection logic
+- Queue messages if disconnected
+
+### Socket Service
+- Create singleton socket instance
+- Connect on app initialization (if authenticated)
+- Reconnect automatically on disconnect
+- Queue events if not connected
+- Handle authentication on connection
+- Emit typing events with debounce (500ms)
+- Clean up listeners on component unmount
+
+### Composables
+
+**useSocket**
+- Setup socket connection
+- Handle socket events
+- Return: socket, isConnected, emit, on, off
+- Auto-cleanup on unmount
+
+**useChat**
+- Manage chat state for active conversation
+- Handle message sending
+- Handle typing indicators
+- Handle read receipts
+- Return: messages, sendMessage, isTyping, markAsRead
+
+**useAuth**
+- Handle authentication state
+- Handle token refresh
+- Handle protected routes
+- Return: user, login, logout, isAuthenticated
+
+### Chat Components
+
+**ChatWindow.vue**
+- Display messages with MessageBubble components
+- Auto-scroll to bottom on new messages
+- Show typing indicator
+- Show online status
+- Handle infinite scroll for message history
+- Use virtual scrolling if > 100 messages
+
+**MessageBubble.vue**
+- Props: message, isOwn
+- Display message content
+- Show timestamp (relative: "2m ago" or absolute)
+- Show delivery status (sent/delivered/read) for own messages
+- Different styling for own vs received messages
+- Handle message formatting (links, line breaks)
+
+**MessageInput.vue**
+- Textarea with auto-resize
+- Send button (disabled if empty)
+- Emit typing events (debounced)
+- Handle Enter to send, Shift+Enter for new line
+- Character counter (max 5000)
+- Emit: send, typing-start, typing-stop
+
+**TypingIndicator.vue**
+- Show when user is typing
+- Animate dots
+- Hide after 3 seconds of no typing
+
+**OnlineStatus.vue**
+- Show green dot if online
+- Show "last seen" if offline
+- Update in real-time via socket
+
+### UI/UX Rules
+
+**Styling (Tailwind CSS)**
+- WhatsApp-inspired color scheme:
+  - Background: bg-gray-50 or bg-gray-100
+  - Own messages: bg-blue-500 text-white
+  - Received messages: bg-white text-gray-900
+  - Input area: bg-white border-gray-300
+- Use rounded corners (rounded-lg, rounded-full)
+- Use shadows for depth (shadow-sm, shadow-md)
+- Responsive design (mobile-first)
+- Dark mode support (optional)
+
+**Message Alignment**
+- Own messages: align-right, blue background
+- Received messages: align-left, white/gray background
+- Show sender name for received messages (if group chat, not needed for 1-to-1)
+
+**Auto-scroll**
+- Scroll to bottom on:
+  - New message received
+  - Message sent
+  - Conversation selected
+- Don't auto-scroll if user scrolled up (check scroll position)
+- Smooth scroll behavior
+
+**Optimistic UI**
+- Show message immediately when sent (before server confirmation)
+- Update with server response (message ID, timestamp)
+- Remove optimistic message if send fails
+- Show loading state while sending
+
+**Loading States**
+- Skeleton loaders for conversations list
+- Loading spinner for messages
+- Disable send button while sending
+- Show "Sending..." indicator
+
+**Error Handling**
+- Show toast notifications for errors
+- Retry failed message sends
+- Show connection status (connected/disconnected/reconnecting)
+- Handle offline mode gracefully
+
+### Router Rules
+- Protected routes require authentication
+- Redirect to login if not authenticated
+- Redirect to /chat if authenticated and accessing /login
+- Use route guards (beforeEach)
+- Lazy load routes for code splitting
+
+### API Service
+- Use axios or fetch
+- Base URL from environment variable
+- Intercept requests to add Authorization header
+- Intercept responses to handle 401 (refresh token or logout)
+- Handle network errors gracefully
+- Use request/response interceptors
+
+---
+
+## Security Rules
+
+### Authentication Security
+- Never store JWT in localStorage (use httpOnly cookies for refresh tokens)
+- Store access tokens in memory or secure storage
+- Validate JWT on every request
+- Implement token rotation
+- Logout on token expiry
+- Clear tokens on logout
+
+### Message Security
+- Verify sender_id matches authenticated user (server-side)
+- Prevent message spoofing (always use socket.data.user, never trust client)
+- Sanitize all message content (XSS prevention)
+- Validate message length server-side
+- Rate limit message sending
+- Block users if abuse detected
+
+### Socket Security
+- Authenticate before allowing any socket events
+- Verify user is conversation participant before joining room
+- Never trust client-sent user IDs
+- Use server-generated IDs and timestamps
+- Validate all socket event payloads
+- Rate limit socket events
+
+### Data Validation
+- Validate all inputs on both client and server
+- Use whitelist validation (reject unknown fields)
+- Sanitize HTML content
+- Escape special characters
+- Prevent SQL injection (parameterized queries)
+- Prevent NoSQL injection (validate object types)
+
+### CORS & Headers
+- Configure CORS for specific frontend origin only
+- Use credentials: true for cookies
+- Set secure headers (helmet.js)
+- Use HTTPS in production
+- Set SameSite cookie attributes
+
+---
+
+## Performance Rules
+
+### Database Performance
+- Use database indexes on all foreign keys
+- Index frequently queried fields (conversation_id, created_at, delivery_status)
+- Use pagination for all list queries (limit: 50)
+- Use database connection pooling (mysql2 pool with min: 2, max: 10)
+- Optimize queries (avoid N+1 queries, use JOINs)
+- Use database transactions for multi-step operations
+- Cache frequently accessed data (user profiles, conversation metadata)
+- Use prepared statements for repeated queries
+- Consider using connection pooling with mysql2/promise
+- Monitor slow query log in production
+
+### Socket Performance
+- Debounce typing events (500ms)
+- Batch read receipt updates
+- Limit socket event payload size
+- Use rooms instead of broadcasting to all
+- Clean up unused rooms
+- Implement message queuing for offline users
+
+### Frontend Performance
+- Lazy load conversation components
+- Virtual scrolling for long message lists
+- Debounce search inputs (300ms)
+- Memoize expensive computations
+- Use v-show instead of v-if when appropriate
+- Optimize re-renders (use key prop correctly)
+- Code split routes
+- Lazy load images
+
+### Caching
+- Cache user profiles (5 minutes)
+- Cache conversation list (1 minute)
+- Invalidate cache on updates
+- Use browser cache for static assets
+
+### Reconnection Handling
+- Exponential backoff for reconnection (1s, 2s, 4s, 8s, max 30s)
+- Show reconnecting indicator
+- Queue messages while disconnected
+- Sync missed messages on reconnect
+- Update online status on reconnect
+
+---
+
+## Code Quality Rules
+
+### General Principles
+- Follow SOLID principles
+- Use async/await (avoid callbacks)
+- Handle all errors (never silent failures)
+- Use meaningful variable and function names
+- Add JSDoc comments for complex functions
+- Keep functions small and focused (single responsibility)
+- Avoid deep nesting (max 3 levels)
+- Use early returns to reduce nesting
+
+### Error Handling
+- Always use try-catch for async operations
+- Create custom error classes
+- Log errors with context
+- Return user-friendly error messages
+- Never expose internal errors to clients
+
+### Code Organization
+- Separate concerns (controllers, services, models)
+- Use dependency injection where appropriate
+- Avoid circular dependencies
+- Group related functionality
+- Use barrel exports (index.js) for clean imports
+
+### Testing Considerations
+- Write unit tests for services
+- Write integration tests for API endpoints
+- Test socket event handlers
+- Test authentication flows
+- Test error scenarios
+- Mock external dependencies
+
+### Naming Conventions
+- Variables: camelCase
+- Functions: camelCase (verb + noun: sendMessage, fetchUser)
+- Classes: PascalCase
+- Constants: UPPER_SNAKE_CASE
+- Files: camelCase for JS, PascalCase for Vue components
+- Database: snake_case
+- Socket events: snake_case (send_message, new_message)
+
+### Comments & Documentation
+- Comment complex business logic
+- Document API endpoints (JSDoc or OpenAPI)
+- Document socket events
+- Explain "why" not "what" in comments
+- Keep comments up-to-date with code
+
+---
+
+## Environment Variables
+
+### Backend (.env)
+```
+NODE_ENV=development
+PORT=3000
+DATABASE_URL=mysql://user:password@localhost:3306/chatdb
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=your_db_user
+DB_PASSWORD=your_db_password
+DB_NAME=chatdb
+JWT_SECRET=your-super-secret-jwt-key-min-32-chars
+JWT_REFRESH_SECRET=your-refresh-token-secret
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=7d
+FRONTEND_URL=http://localhost:5173
+REDIS_URL=redis://localhost:6379 (optional, for production)
+```
+
+### Frontend (.env)
+```
+VITE_API_URL=http://localhost:3000/api
+VITE_SOCKET_URL=http://localhost:3000
+```
+
+---
+
+## Implementation Checklist
+
+When implementing features, ensure:
+- [ ] Authentication works on both REST and Socket
+- [ ] Messages are persisted in database
+- [ ] Real-time updates work via Socket.IO
+- [ ] Typing indicators are debounced
+- [ ] Read receipts update correctly
+- [ ] Online/offline status is accurate
+- [ ] Messages are sanitized and validated
+- [ ] Rate limiting is implemented
+- [ ] Error handling is comprehensive
+- [ ] UI is responsive and accessible
+- [ ] Auto-scroll works correctly
+- [ ] Optimistic UI updates work
+- [ ] Reconnection handling works
+- [ ] Pagination works for messages
+- [ ] Security validations are in place
+
+---
+
+## Production Considerations
+
+- Use environment-specific configurations
+- Enable database query logging in development only
+- Use Redis for session storage and rate limiting
+- Implement message queuing (Bull/BullMQ) for high volume
+- Use CDN for static assets
+- Enable compression (gzip/brotli)
+- Set up monitoring and logging (Winston, Sentry)
+- Implement health check endpoints
+- Use process managers (PM2)
+- Set up database backups
+- Use connection pooling
+- Implement graceful shutdown
+- Monitor socket connection counts
+- Set up alerts for errors and performance issues
+
+---
+
+## Important Notes
+
+- NEVER trust client-side data
+- ALWAYS validate and sanitize on server
+- ALWAYS verify user permissions server-side
+- Use transactions for data consistency
+- Handle edge cases (user deleted, conversation deleted)
+- Test with multiple concurrent users
+- Handle race conditions (e.g., simultaneous message sends)
+- Implement proper cleanup on disconnect
+- Monitor memory usage (socket connections)
+- Use connection limits to prevent abuse
+
